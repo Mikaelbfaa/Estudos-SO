@@ -4,76 +4,85 @@
 #include <stdint.h>
 #include <time.h>
 
-#define VIRTUAL_ADDRESS_BITS 16
-#define PAGE_SIZE_BITS 10
-#define PAGE_SIZE (1 << PAGE_SIZE_BITS)
-#define NUM_VIRTUAL_PAGES (1 << (VIRTUAL_ADDRESS_BITS - PAGE_SIZE_BITS))
-#define PHYSICAL_MEMORY_SIZE 32768
-#define NUM_PHYSICAL_FRAMES (PHYSICAL_MEMORY_SIZE / PAGE_SIZE)
+// configuracoes do sistema
+#define ADDR_BITS 16
+#define PAGE_BITS 10
+#define PAGE_SIZE (1 << PAGE_BITS)
+#define TOTAL_PAGES (1 << (ADDR_BITS - PAGE_BITS))
+#define RAM_SIZE 32768
+#define TOTAL_FRAMES (RAM_SIZE / PAGE_SIZE)
 
-#define TLB_SIZE 16
+// configuracoes da TLB
+#define TLB_ENTRIES 16
 #define ASID_BITS 8
 
+// politicas de substituicao da TLB
 typedef enum {
-    REPLACEMENT_LRU,
-    REPLACEMENT_RANDOM,
-    REPLACEMENT_FIFO
-} ReplacementPolicy;
+    POLICY_LRU,     // least recently used
+    POLICY_RANDOM,  // aleatoria
+    POLICY_FIFO     // first in first out
+} replacement_policy_t;
 
+// entrada da TLB (translation lookaside buffer)
 typedef struct {
-    uint8_t valid;
-    uint16_t vpn;
-    uint16_t pfn;
-    uint8_t asid;
-    uint8_t protection;
-    uint8_t dirty;
-    uint8_t global;
-    uint32_t last_access;
-} TLBEntry;
+    uint8_t valid;        // entrada valida?
+    uint16_t vpn;         // virtual page number
+    uint16_t pfn;         // physical frame number
+    uint8_t asid;         // address space id
+    uint8_t protection;   // permissoes rwx
+    uint8_t dirty;        // foi modificada?
+    uint8_t global;       // pagina global?
+    uint32_t timestamp;   // quando foi acessada
+} tlb_entry_t;
 
+// entrada da tabela de paginas
 typedef struct {
-    uint8_t valid;
-    uint8_t present;
-    uint8_t dirty;
-    uint8_t referenced;
-    uint8_t protection;
-    uint16_t pfn;
-} PageTableEntry;
+    uint8_t valid;        // entrada valida?
+    uint8_t present;      // pagina na memoria?
+    uint8_t dirty;        // foi modificada?
+    uint8_t referenced;   // foi acessada?
+    uint8_t protection;   // permissoes
+    uint16_t pfn;         // physical frame number
+} page_entry_t;
 
+// processo com sua tabela de paginas
 typedef struct {
-    uint8_t asid;
-    PageTableEntry* page_table;
-    char name[32];
-} Process;
+    uint8_t asid;             // id do espaco de enderecamento
+    page_entry_t* page_table; // tabela de paginas
+    char name[32];            // nome do processo
+} process_t;
 
+// sistema completo com TLB
 typedef struct {
-    uint8_t physical_memory[PHYSICAL_MEMORY_SIZE];
-    TLBEntry tlb[TLB_SIZE];
-    Process* current_process;
-    Process processes[4];
-    ReplacementPolicy replacement_policy;
-    uint32_t clock_counter;
-    uint32_t tlb_hits;
-    uint32_t tlb_misses;
-    uint32_t total_accesses;
-    uint32_t context_switches;
-} TLBSystem;
+    uint8_t ram[RAM_SIZE];                 // memoria fisica
+    tlb_entry_t tlb[TLB_ENTRIES];          // translation lookaside buffer
+    process_t* current_process;            // processo atual
+    process_t processes[4];                // lista de processos
+    replacement_policy_t policy;           // politica de substituicao
+    uint32_t clock_tick;                   // contador de tempo
+    uint32_t hit_count;                    // acertos na TLB
+    uint32_t miss_count;                   // falhas na TLB
+    uint32_t access_count;                 // total de acessos
+    uint32_t context_switch_count;         // mudancas de contexto
+} tlb_system_t;
 
-TLBSystem* init_tlb_system() {
-    TLBSystem* sys = (TLBSystem*)calloc(1, sizeof(TLBSystem));
+tlb_system_t* setup_tlb_system() {
+    tlb_system_t* sys = (tlb_system_t*)calloc(1, sizeof(tlb_system_t));
     if (!sys) {
-        printf("Erro ao alocar memória\n");
+        printf("Erro ao alocar memoria\n");
         exit(1);
     }
 
-    for (int i = 0; i < TLB_SIZE; i++) {
+    // inicializa TLB como vazia
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         sys->tlb[i].valid = 0;
     }
 
+    // cria alguns processos de exemplo
     for (int i = 0; i < 4; i++) {
         sys->processes[i].asid = i + 1;
         sprintf(sys->processes[i].name, "Process_%d", i + 1);
-        sys->processes[i].page_table = (PageTableEntry*)calloc(NUM_VIRTUAL_PAGES, sizeof(PageTableEntry));
+        sys->processes[i].page_table = (page_entry_t*)calloc(TOTAL_PAGES, sizeof(page_entry_t));
 
         if (i == 0) {
             for (int j = 0; j < 3; j++) {
@@ -106,61 +115,62 @@ TLBSystem* init_tlb_system() {
     }
 
     sys->current_process = &sys->processes[0];
-    sys->replacement_policy = REPLACEMENT_LRU;
-    sys->clock_counter = 0;
+    sys->policy = POLICY_LRU;  // usa LRU por padrao
+    sys->clock_tick = 0;
 
     srand(time(NULL));
 
     return sys;
 }
 
-int tlb_lookup(TLBSystem* sys, uint16_t vpn, uint8_t asid) {
-    for (int i = 0; i < TLB_SIZE; i++) {
+// procura uma entrada na TLB
+int search_tlb(tlb_system_t* sys, uint16_t vpn, uint8_t asid) {
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         if (sys->tlb[i].valid &&
             sys->tlb[i].vpn == vpn &&
             (sys->tlb[i].global || sys->tlb[i].asid == asid)) {
 
-            sys->tlb[i].last_access = sys->clock_counter++;
+            sys->tlb[i].timestamp = sys->clock_tick++;  // atualiza timestamp
             return i;
         }
     }
-    return -1;
+    return -1;  // nao encontrou
 }
 
-int find_tlb_victim(TLBSystem* sys) {
-    int victim = 0;
-
-    for (int i = 0; i < TLB_SIZE; i++) {
+// encontra uma entrada da TLB para substituir
+int find_victim_entry(tlb_system_t* sys) {
+    // primeiro procura por entrada vazia
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         if (!sys->tlb[i].valid) {
             return i;
         }
     }
 
-    switch (sys->replacement_policy) {
-        case REPLACEMENT_LRU:
+    int victim = 0;
+    
+    switch (sys->policy) {
+        case POLICY_LRU:
             {
-                uint32_t oldest_time = sys->tlb[0].last_access;
-                victim = 0;
-                for (int i = 1; i < TLB_SIZE; i++) {
-                    if (sys->tlb[i].last_access < oldest_time) {
-                        oldest_time = sys->tlb[i].last_access;
+                uint32_t oldest = sys->tlb[0].timestamp;
+                for (int i = 1; i < TLB_ENTRIES; i++) {
+                    if (sys->tlb[i].timestamp < oldest) {
+                        oldest = sys->tlb[i].timestamp;
                         victim = i;
                     }
                 }
             }
             break;
 
-        case REPLACEMENT_RANDOM:
-            victim = rand() % TLB_SIZE;
+        case POLICY_RANDOM:
+            victim = rand() % TLB_ENTRIES;
             break;
 
-        case REPLACEMENT_FIFO:
+        case POLICY_FIFO:
             {
-                uint32_t oldest_time = sys->tlb[0].last_access;
-                victim = 0;
-                for (int i = 1; i < TLB_SIZE; i++) {
-                    if (sys->tlb[i].last_access < oldest_time) {
-                        oldest_time = sys->tlb[i].last_access;
+                uint32_t oldest = sys->tlb[0].timestamp;
+                for (int i = 1; i < TLB_ENTRIES; i++) {
+                    if (sys->tlb[i].timestamp < oldest) {
+                        oldest = sys->tlb[i].timestamp;
                         victim = i;
                     }
                 }
@@ -171,108 +181,117 @@ int find_tlb_victim(TLBSystem* sys) {
     return victim;
 }
 
-void tlb_insert(TLBSystem* sys, uint16_t vpn, uint16_t pfn, uint8_t protection) {
-    int victim = find_tlb_victim(sys);
+// insere uma nova entrada na TLB
+void insert_tlb_entry(tlb_system_t* sys, uint16_t vpn, uint16_t pfn, uint8_t protection) {
+    int slot = find_victim_entry(sys);
 
-    sys->tlb[victim].valid = 1;
-    sys->tlb[victim].vpn = vpn;
-    sys->tlb[victim].pfn = pfn;
-    sys->tlb[victim].asid = sys->current_process->asid;
-    sys->tlb[victim].protection = protection;
-    sys->tlb[victim].dirty = 0;
-    sys->tlb[victim].global = 0;
-    sys->tlb[victim].last_access = sys->clock_counter++;
+    sys->tlb[slot].valid = 1;
+    sys->tlb[slot].vpn = vpn;
+    sys->tlb[slot].pfn = pfn;
+    sys->tlb[slot].asid = sys->current_process->asid;
+    sys->tlb[slot].protection = protection;
+    sys->tlb[slot].dirty = 0;
+    sys->tlb[slot].global = 0;
+    sys->tlb[slot].timestamp = sys->clock_tick++;
 
-    printf("  TLB: Inserido VPN=%d -> PFN=%d no slot %d\n", vpn, pfn, victim);
+    printf("  TLB: Inserido VPN=%d -> PFN=%d no slot %d\n", vpn, pfn, slot);
 }
 
-void tlb_flush(TLBSystem* sys) {
-    for (int i = 0; i < TLB_SIZE; i++) {
+// limpa toda a TLB
+void flush_tlb(tlb_system_t* sys) {
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         sys->tlb[i].valid = 0;
     }
     printf("  TLB: Flush completo\n");
 }
 
-void tlb_flush_asid(TLBSystem* sys, uint8_t asid) {
-    int count = 0;
-    for (int i = 0; i < TLB_SIZE; i++) {
+// remove entradas de um processo especifico
+void flush_asid_entries(tlb_system_t* sys, uint8_t asid) {
+    int removed = 0;
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         if (sys->tlb[i].valid && sys->tlb[i].asid == asid && !sys->tlb[i].global) {
             sys->tlb[i].valid = 0;
-            count++;
+            removed++;
         }
     }
-    printf("  TLB: Removidas %d entradas do ASID %d\n", count, asid);
+    printf("  TLB: Removidas %d entradas do ASID %d\n", removed, asid);
 }
 
-uint32_t translate_with_tlb(TLBSystem* sys, uint32_t virtual_address) {
-    sys->total_accesses++;
+// faz traducao usando TLB + tabela de paginas
+uint32_t translate_address(tlb_system_t* sys, uint32_t virtual_addr) {
+    sys->access_count++;
 
-    uint16_t vpn = (virtual_address >> PAGE_SIZE_BITS) & ((1 << (VIRTUAL_ADDRESS_BITS - PAGE_SIZE_BITS)) - 1);
-    uint16_t offset = virtual_address & ((1 << PAGE_SIZE_BITS) - 1);
+    uint16_t vpn = (virtual_addr >> PAGE_BITS) & ((1 << (ADDR_BITS - PAGE_BITS)) - 1);
+    uint16_t offset = virtual_addr & ((1 << PAGE_BITS) - 1);
     uint8_t asid = sys->current_process->asid;
 
-    printf("\nTradução: VA=0x%08X (Processo %s, ASID=%d)\n",
-           virtual_address, sys->current_process->name, asid);
+    printf("\nTraducao: VA=0x%08X (Processo %s, ASID=%d)\n",
+           virtual_addr, sys->current_process->name, asid);
     printf("  VPN=%d, Offset=%d\n", vpn, offset);
 
-    int tlb_index = tlb_lookup(sys, vpn, asid);
+    int tlb_slot = search_tlb(sys, vpn, asid);
 
-    if (tlb_index >= 0) {
-        sys->tlb_hits++;
-        TLBEntry* entry = &sys->tlb[tlb_index];
-        uint32_t physical_address = (entry->pfn << PAGE_SIZE_BITS) | offset;
+    if (tlb_slot >= 0) {
+        // acerto na TLB!
+        sys->hit_count++;
+        tlb_entry_t* entry = &sys->tlb[tlb_slot];
+        uint32_t phys_addr = (entry->pfn << PAGE_BITS) | offset;
 
-        printf("  TLB HIT! Slot=%d, PFN=%d\n", tlb_index, entry->pfn);
-        printf("  PA=0x%08X\n", physical_address);
+        printf("  TLB HIT! Slot=%d, PFN=%d\n", tlb_slot, entry->pfn);
+        printf("  PA=0x%08X\n", phys_addr);
 
-        return physical_address;
+        return phys_addr;
     } else {
-        sys->tlb_misses++;
+        // falha na TLB - precisa consultar tabela de paginas
+        sys->miss_count++;
         printf("  TLB MISS!\n");
 
-        PageTableEntry* pte = &sys->current_process->page_table[vpn];
+        page_entry_t* entry = &sys->current_process->page_table[vpn];
 
-        if (!pte->valid) {
-            printf("  ERRO: Página não válida (SEGMENTATION_FAULT)\n");
+        if (!entry->valid) {
+            printf("  ERRO: Pagina nao valida (SEGFAULT)\n");
             return 0xFFFFFFFF;
         }
 
-        if (!pte->present) {
-            printf("  ERRO: Página não presente (PAGE_FAULT)\n");
+        if (!entry->present) {
+            printf("  ERRO: Pagina nao presente (PAGE FAULT)\n");
             return 0xFFFFFFFF;
         }
 
-        tlb_insert(sys, vpn, pte->pfn, pte->protection);
+        // insere na TLB para proximos acessos
+        insert_tlb_entry(sys, vpn, entry->pfn, entry->protection);
 
-        uint32_t physical_address = (pte->pfn << PAGE_SIZE_BITS) | offset;
-        printf("  PA=0x%08X (da tabela de páginas)\n", physical_address);
+        uint32_t phys_addr = (entry->pfn << PAGE_BITS) | offset;
+        printf("  PA=0x%08X (da tabela de paginas)\n", phys_addr);
 
-        return physical_address;
+        return phys_addr;
     }
 }
 
-void context_switch(TLBSystem* sys, int process_id) {
+// muda de processo
+void switch_process(tlb_system_t* sys, int process_id) {
     if (process_id < 0 || process_id >= 4) {
-        printf("Processo inválido\n");
+        printf("ID de processo invalido\n");
         return;
     }
 
-    sys->context_switches++;
-    Process* old_process = sys->current_process;
+    sys->context_switch_count++;
+    process_t* old_proc = sys->current_process;
     sys->current_process = &sys->processes[process_id];
 
-    printf("\n=== CONTEXT SWITCH: %s -> %s ===\n",
-           old_process->name, sys->current_process->name);
+    printf("\n=== MUDANCA DE CONTEXTO: %s -> %s ===\n",
+           old_proc->name, sys->current_process->name);
 
-    printf("  Mantendo TLB com ASIDs\n");
+    printf("  Mantendo TLB com ASIDs (nao precisa flush)\n");
 }
 
-void print_tlb(TLBSystem* sys) {
+// mostra o estado atual da TLB
+void show_tlb_state(tlb_system_t* sys) {
     printf("\n=== ESTADO DA TLB ===\n");
-    printf("Slot\tValid\tVPN\tPFN\tASID\tGlobal\tProt\tLast\n");
+    printf("Slot\tValid\tVPN\tPFN\tASID\tGlobal\tPerm\tTime\n");
     printf("----\t-----\t---\t---\t----\t------\t----\t----\n");
 
-    for (int i = 0; i < TLB_SIZE; i++) {
+    for (int i = 0; i < TLB_ENTRIES; i++) {
         if (sys->tlb[i].valid) {
             printf("%d\t%d\t%d\t%d\t%d\t%d\t",
                    i,
@@ -282,76 +301,81 @@ void print_tlb(TLBSystem* sys) {
                    sys->tlb[i].asid,
                    sys->tlb[i].global);
 
-            if (sys->tlb[i].protection & 0x4) printf("R");
+            // mostra permissoes de forma legivel
+            if (sys->tlb[i].protection & 0x4) printf("r");
             else printf("-");
-            if (sys->tlb[i].protection & 0x2) printf("W");
+            if (sys->tlb[i].protection & 0x2) printf("w");
             else printf("-");
-            if (sys->tlb[i].protection & 0x1) printf("X");
+            if (sys->tlb[i].protection & 0x1) printf("x");
             else printf("-");
 
-            printf("\t%d\n", sys->tlb[i].last_access);
+            printf("\t%d\n", sys->tlb[i].timestamp);
         }
     }
 }
 
-void simulate_array_access(TLBSystem* sys) {
-    printf("\n=== SIMULAÇÃO DE ACESSO A ARRAY ===\n");
-    printf("Acessando array de 10 elementos (4 bytes cada) começando em VA 0x0000\n");
+// simula acesso a um array para testar localidade
+void test_array_access(tlb_system_t* sys) {
+    printf("\n=== SIMULACAO DE ACESSO A ARRAY ===\n");
+    printf("Acessando array de 10 elementos (4 bytes cada) comecando em VA 0x0000\n");
 
+    // primeira passada - muitos TLB misses
     for (int i = 0; i < 10; i++) {
         uint32_t addr = i * 4;
-        translate_with_tlb(sys, addr);
+        translate_address(sys, addr);
     }
 
-    printf("\n--- Segunda passada pelo array (demonstra localidade temporal) ---\n");
+    printf("\n--- Segunda passada (demonstra localidade temporal) ---\n");
+    // segunda passada - mais TLB hits
     for (int i = 0; i < 10; i++) {
         uint32_t addr = i * 4;
-        translate_with_tlb(sys, addr);
+        translate_address(sys, addr);
     }
 }
 
-void print_statistics(TLBSystem* sys) {
-    printf("\n=== ESTATÍSTICAS DO SISTEMA ===\n");
-    printf("Total de acessos: %d\n", sys->total_accesses);
-    printf("TLB Hits: %d\n", sys->tlb_hits);
-    printf("TLB Misses: %d\n", sys->tlb_misses);
+// mostra estatisticas do sistema
+void show_stats(tlb_system_t* sys) {
+    printf("\n=== ESTATISTICAS DO SISTEMA ===\n");
+    printf("Total de acessos: %d\n", sys->access_count);
+    printf("TLB Hits: %d\n", sys->hit_count);
+    printf("TLB Misses: %d\n", sys->miss_count);
 
-    if (sys->total_accesses > 0) {
-        float hit_rate = (float)sys->tlb_hits / sys->total_accesses * 100;
+    if (sys->access_count > 0) {
+        float hit_rate = (float)sys->hit_count / sys->access_count * 100;
         printf("Taxa de acerto da TLB: %.2f%%\n", hit_rate);
     }
 
-    printf("Mudanças de contexto: %d\n", sys->context_switches);
+    printf("Mudancas de contexto: %d\n", sys->context_switch_count);
 }
 
 int main() {
-    printf("=== SISTEMA DE PAGINAÇÃO COM TLB ===\n");
-    printf("Tamanho da TLB: %d entradas\n", TLB_SIZE);
-    printf("Tamanho da página: %d bytes\n", PAGE_SIZE);
+    printf("=== SISTEMA DE PAGINACAO COM TLB ===\n");
+    printf("Tamanho da TLB: %d entradas\n", TLB_ENTRIES);
+    printf("Tamanho da pagina: %d bytes\n", PAGE_SIZE);
     printf("Bits para ASID: %d\n", ASID_BITS);
 
-    TLBSystem* sys = init_tlb_system();
+    tlb_system_t* sys = setup_tlb_system();
 
     printf("\n### TESTE 1: Localidade Espacial e Temporal ###\n");
-    simulate_array_access(sys);
-    print_tlb(sys);
+    test_array_access(sys);
+    show_tlb_state(sys);
 
-    printf("\n### TESTE 2: Context Switch ###\n");
-    context_switch(sys, 1);
+    printf("\n### TESTE 2: Mudanca de Processo ###\n");
+    switch_process(sys, 1);
 
-    translate_with_tlb(sys, 0x0000);
-    translate_with_tlb(sys, 0x0400);
-    translate_with_tlb(sys, 0x2800);
+    translate_address(sys, 0x0000);
+    translate_address(sys, 0x0400);
+    translate_address(sys, 0x2800);
 
-    print_tlb(sys);
+    show_tlb_state(sys);
 
     printf("\n### TESTE 3: Retorno ao Processo 1 ###\n");
-    context_switch(sys, 0);
+    switch_process(sys, 0);
 
-    translate_with_tlb(sys, 0x0000);
-    translate_with_tlb(sys, 0x0010);
+    translate_address(sys, 0x0000);
+    translate_address(sys, 0x0010);
 
-    print_statistics(sys);
+    show_stats(sys);
 
     return 0;
 }

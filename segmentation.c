@@ -2,120 +2,134 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define MAX_SEGMENTS 3
-#define CODE 0
-#define HEAP 1
-#define STACK 2
+// tipos de segmento
+#define MAX_SEGS 3
+#define CODE_SEG 0
+#define HEAP_SEG 1
+#define STACK_SEG 2
 
-#define R 1
-#define W 2
-#define X 4
+// permissoes
+#define READ_PERM 1
+#define WRITE_PERM 2
+#define EXEC_PERM 4
 
+// dados de um segmento
 typedef struct {
-    uint16_t base;
-    uint16_t size;
-    uint16_t limit;
-    uint8_t direction;
-    uint8_t prot;
-} seg_t;
+    uint16_t base_addr;    // endereco base
+    uint16_t size;         // tamanho do segmento
+    uint16_t limit;        // limite maximo
+    uint8_t grows_up;      // cresce para cima ou para baixo?
+    uint8_t permissions;   // permissoes rwx
+} segment_t;
 
+// unidade de gerenciamento de memoria
 typedef struct {
-    uint8_t *mem;
-    uint16_t mem_size;
-    uint16_t addr_space;
-    seg_t segs[MAX_SEGMENTS];
-    uint8_t seg_bits;
+    uint8_t *memory;                // ponteiro para memoria fisica
+    uint16_t total_memory;          // tamanho total da memoria
+    uint16_t virtual_space;         // tamanho do espaco virtual
+    segment_t segments[MAX_SEGS];   // array de segmentos
+    uint8_t segment_bits;           // bits usados para identificar segmento
 } mmu_t;
 
-mmu_t* create_mmu(uint16_t mem_size, uint16_t addr_space) {
+mmu_t* setup_mmu(uint16_t mem_size, uint16_t addr_space) {
     mmu_t *mmu = malloc(sizeof(mmu_t));
 
-    mmu->mem = calloc(mem_size, 1);
-    mmu->mem_size = mem_size;
-    mmu->addr_space = addr_space;
-    mmu->seg_bits = 2;
+    mmu->memory = calloc(mem_size, 1);
+    mmu->total_memory = mem_size;
+    mmu->virtual_space = addr_space;
+    mmu->segment_bits = 2;  // usamos 2 bits para identificar o segmento
 
-    int i;
-    for (i = 0; i < MAX_SEGMENTS; i++) {
-        mmu->segs[i].base = 0;
-        mmu->segs[i].size = 0;
-        mmu->segs[i].limit = addr_space >> mmu->seg_bits;
-        mmu->segs[i].direction = 1;
-        mmu->segs[i].prot = R | W;
+    // inicializa os segmentos com valores padrao
+    for (int i = 0; i < MAX_SEGS; i++) {
+        mmu->segments[i].base_addr = 0;
+        mmu->segments[i].size = 0;
+        mmu->segments[i].limit = addr_space >> mmu->segment_bits;
+        mmu->segments[i].grows_up = 1;  // por padrao cresce para cima
+        mmu->segments[i].permissions = READ_PERM | WRITE_PERM;
     }
 
-    mmu->segs[STACK].direction = 0;
-    mmu->segs[CODE].prot = R | X;
+    // configura particularidades de cada segmento
+    mmu->segments[STACK_SEG].grows_up = 0;  // stack cresce para baixo
+    mmu->segments[CODE_SEG].permissions = READ_PERM | EXEC_PERM;  // codigo eh read+exec
 
     return mmu;
 }
 
-void setup_segment(mmu_t *mmu, uint8_t id, uint16_t base, uint16_t size, uint8_t prot) {
-    if (id >= MAX_SEGMENTS) {
-        printf("bad segment id\n");
+void configure_segment(mmu_t *mmu, uint8_t seg_id, uint16_t base, uint16_t size, uint8_t perms) {
+    if (seg_id >= MAX_SEGS) {
+        printf("id de segmento invalido\n");
         return;
     }
 
-    if (base + size > mmu->mem_size) {
-        printf("segment too big\n");
+    if (base + size > mmu->total_memory) {
+        printf("segmento muito grande\n");
         return;
     }
 
-    mmu->segs[id].base = base;
-    mmu->segs[id].size = size;
-    mmu->segs[id].prot = prot;
+    mmu->segments[seg_id].base_addr = base;
+    mmu->segments[seg_id].size = size;
+    mmu->segments[seg_id].permissions = perms;
 }
 
-uint8_t which_segment(mmu_t *mmu, uint16_t vaddr) {
-    uint8_t bits = 0;
-    uint16_t tmp = mmu->addr_space - 1;
-    while (tmp > 0) {
-        bits++;
-        tmp >>= 1;
+// descobre qual segmento baseado no endereco virtual
+uint8_t get_segment_id(mmu_t *mmu, uint16_t virtual_addr) {
+    uint8_t total_bits = 0;
+    uint16_t temp = mmu->virtual_space - 1;
+    
+    // calcula quantos bits temos no total
+    while (temp > 0) {
+        total_bits++;
+        temp >>= 1;
     }
 
-    return vaddr >> (bits - mmu->seg_bits);
+    return virtual_addr >> (total_bits - mmu->segment_bits);
 }
 
-uint16_t get_offset(mmu_t *mmu, uint16_t vaddr) {
-    uint8_t bits = 0;
-    uint16_t tmp = mmu->addr_space - 1;
-    while (tmp > 0) {
-        bits++;
-        tmp >>= 1;
+// extrai o offset dentro do segmento
+uint16_t get_segment_offset(mmu_t *mmu, uint16_t virtual_addr) {
+    uint8_t total_bits = 0;
+    uint16_t temp = mmu->virtual_space - 1;
+    
+    while (temp > 0) {
+        total_bits++;
+        temp >>= 1;
     }
 
-    uint16_t mask = (1 << (bits - mmu->seg_bits)) - 1;
-    return vaddr & mask;
+    uint16_t mask = (1 << (total_bits - mmu->segment_bits)) - 1;
+    return virtual_addr & mask;
 }
 
-int translate(mmu_t *mmu, uint16_t vaddr, uint16_t *paddr, uint8_t op) {
-    uint8_t seg_id = which_segment(mmu, vaddr);
-    uint16_t offset = get_offset(mmu, vaddr);
+// faz a traducao de endereco virtual para fisico
+int do_translation(mmu_t *mmu, uint16_t virt_addr, uint16_t *phys_addr, uint8_t operation) {
+    uint8_t seg_id = get_segment_id(mmu, virt_addr);
+    uint16_t offset = get_segment_offset(mmu, virt_addr);
 
-    printf("virtual 0x%x -> seg %d, offset %d\n", vaddr, seg_id, offset);
+    printf("virtual 0x%x -> segmento %d, offset %d\n", virt_addr, seg_id, offset);
 
-    if (seg_id >= MAX_SEGMENTS) {
-        printf("invalid segment\n");
+    if (seg_id >= MAX_SEGS) {
+        printf("segmento invalido\n");
         return -1;
     }
 
-    seg_t *seg = &mmu->segs[seg_id];
+    segment_t *seg = &mmu->segments[seg_id];
 
-    if (!(seg->prot & op)) {
-        printf("protection fault\n");
+    // verifica permissoes
+    if (!(seg->permissions & operation)) {
+        printf("violacao de protecao\n");
         return -1;
     }
 
     uint16_t real_offset;
 
-    if (seg->direction) {
+    if (seg->grows_up) {
+        // segmento que cresce para cima (code, heap)
         real_offset = offset;
         if (offset >= seg->size) {
             printf("segfault: %d >= %d\n", offset, seg->size);
             return -1;
         }
     } else {
+        // segmento que cresce para baixo (stack)
         if (offset >= seg->size) {
             printf("stack overflow\n");
             return -1;
@@ -123,59 +137,57 @@ int translate(mmu_t *mmu, uint16_t vaddr, uint16_t *paddr, uint8_t op) {
         real_offset = seg->limit - offset - 1;
     }
 
-    *paddr = seg->base + real_offset;
+    *phys_addr = seg->base_addr + real_offset;
 
-    if (*paddr >= mmu->mem_size) {
-        printf("physical address out of bounds\n");
+    if (*phys_addr >= mmu->total_memory) {
+        printf("endereco fisico fora dos limites\n");
         return -1;
     }
 
-    printf("physical 0x%x\n", *paddr);
+    printf("endereco fisico: 0x%x\n", *phys_addr);
     return 0;
 }
 
-int write_byte(mmu_t *mmu, uint16_t vaddr, uint8_t val) {
-    uint16_t paddr;
-    if (translate(mmu, vaddr, &paddr, W) != 0) {
+int write_byte(mmu_t *mmu, uint16_t virt_addr, uint8_t value) {
+    uint16_t phys_addr;
+    if (do_translation(mmu, virt_addr, &phys_addr, WRITE_PERM) != 0) {
         return -1;
     }
 
-    mmu->mem[paddr] = val;
-    printf("wrote 0x%02x to 0x%x\n", val, paddr);
+    mmu->memory[phys_addr] = value;
+    printf("escreveu 0x%02x em 0x%x\n", value, phys_addr);
     return 0;
 }
 
-int read_byte(mmu_t *mmu, uint16_t vaddr, uint8_t *val) {
-    uint16_t paddr;
-    if (translate(mmu, vaddr, &paddr, R) != 0) {
+int read_byte(mmu_t *mmu, uint16_t virt_addr, uint8_t *value) {
+    uint16_t phys_addr;
+    if (do_translation(mmu, virt_addr, &phys_addr, READ_PERM) != 0) {
         return -1;
     }
 
-    *val = mmu->mem[paddr];
-    printf("read 0x%02x from 0x%x\n", *val, paddr);
+    *value = mmu->memory[phys_addr];
+    printf("leu 0x%02x de 0x%x\n", *value, phys_addr);
     return 0;
 }
 
-void write_bytes(mmu_t *mmu, uint16_t addr, uint8_t *data, uint16_t len) {
-    printf("\nwriting %d bytes at 0x%x\n", len, addr);
+void write_data(mmu_t *mmu, uint16_t addr, uint8_t *data, uint16_t length) {
+    printf("\nescrevendo %d bytes em 0x%x\n", length, addr);
 
-    uint16_t i;
-    for (i = 0; i < len; i++) {
+    for (int i = 0; i < length; i++) {
         if (write_byte(mmu, addr + i, data[i]) != 0) {
-            printf("failed at byte %d\n", i);
+            printf("falhou no byte %d\n", i);
             return;
         }
     }
 }
 
-void read_bytes(mmu_t *mmu, uint16_t addr, uint16_t len) {
-    printf("\nreading %d bytes from 0x%x: ", len, addr);
+void read_data(mmu_t *mmu, uint16_t addr, uint16_t length) {
+    printf("\nlendo %d bytes de 0x%x: ", length, addr);
 
-    uint16_t i;
-    for (i = 0; i < len; i++) {
-        uint8_t val;
-        if (read_byte(mmu, addr + i, &val) == 0) {
-            printf("%02x ", val);
+    for (int i = 0; i < length; i++) {
+        uint8_t value;
+        if (read_byte(mmu, addr + i, &value) == 0) {
+            printf("%02x ", value);
         } else {
             printf("?? ");
             break;
@@ -184,38 +196,36 @@ void read_bytes(mmu_t *mmu, uint16_t addr, uint16_t len) {
     printf("\n");
 }
 
-void show_segments(mmu_t *mmu) {
-    char *names[] = {"CODE", "HEAP", "STACK"};
-    char *perms[] = {"---", "r--", "-w-", "rw-", "--x", "r-x", "-wx", "rwx"};
+void display_segments(mmu_t *mmu) {
+    char *seg_names[] = {"CODE", "HEAP", "STACK"};
+    char *perm_strings[] = {"---", "r--", "-w-", "rw-", "--x", "r-x", "-wx", "rwx"};
 
-    printf("\nSegments:\n");
-    printf("name     base  size  limit dir perm\n");
-    printf("-------- ----- ----- ----- --- ----\n");
+    printf("\nSegmentos:\n");
+    printf("nome     base  tam   limite dir perm\n");
+    printf("-------- ----- ----- ------ --- ----\n");
 
-    int i;
-    for (i = 0; i < MAX_SEGMENTS; i++) {
-        printf("%-8s %5d %5d %5d  %c  %s\n",
-               names[i],
-               mmu->segs[i].base,
-               mmu->segs[i].size,
-               mmu->segs[i].limit,
-               mmu->segs[i].direction ? '+' : '-',
-               perms[mmu->segs[i].prot]);
+    for (int i = 0; i < MAX_SEGS; i++) {
+        printf("%-8s %5d %5d %6d  %c  %s\n",
+               seg_names[i],
+               mmu->segments[i].base_addr,
+               mmu->segments[i].size,
+               mmu->segments[i].limit,
+               mmu->segments[i].grows_up ? '+' : '-',
+               perm_strings[mmu->segments[i].permissions]);
     }
     printf("\n");
 }
 
-void dump_mem(mmu_t *mmu, uint16_t start, uint16_t len) {
-    printf("memory dump 0x%04x-0x%04x:\n", start, start + len - 1);
+void dump_memory(mmu_t *mmu, uint16_t start, uint16_t length) {
+    printf("dump da memoria 0x%04x-0x%04x:\n", start, start + length - 1);
 
-    uint16_t i;
-    for (i = 0; i < len; i += 16) {
+    for (int i = 0; i < length; i += 16) {
         printf("%04x: ", start + i);
 
-        uint16_t j;
-        for (j = 0; j < 16 && (i + j) < len; j++) {
-            if (start + i + j < mmu->mem_size) {
-                printf("%02x ", mmu->mem[start + i + j]);
+        // mostra os bytes em hex
+        for (int j = 0; j < 16 && (i + j) < length; j++) {
+            if (start + i + j < mmu->total_memory) {
+                printf("%02x ", mmu->memory[start + i + j]);
             } else {
                 printf("?? ");
             }
@@ -223,10 +233,11 @@ void dump_mem(mmu_t *mmu, uint16_t start, uint16_t len) {
 
         printf("| ");
 
-        for (j = 0; j < 16 && (i + j) < len; j++) {
-            if (start + i + j < mmu->mem_size) {
-                uint8_t b = mmu->mem[start + i + j];
-                printf("%c", (b >= 32 && b <= 126) ? b : '.');
+        // mostra os caracteres ASCII
+        for (int j = 0; j < 16 && (i + j) < length; j++) {
+            if (start + i + j < mmu->total_memory) {
+                uint8_t byte = mmu->memory[start + i + j];
+                printf("%c", (byte >= 32 && byte <= 126) ? byte : '.');
             } else {
                 printf("?");
             }
@@ -236,47 +247,49 @@ void dump_mem(mmu_t *mmu, uint16_t start, uint16_t len) {
     printf("\n");
 }
 
-void test_segmentation() {
-    printf("Memory Segmentation Simulator\n");
-    printf("============================\n\n");
+void run_tests() {
+    printf("Simulador de Segmentacao de Memoria\n");
+    printf("===================================\n\n");
 
-    mmu_t *mmu = create_mmu(1024, 256);
+    mmu_t *mmu = setup_mmu(1024, 256);
 
-    setup_segment(mmu, CODE, 512, 64, R | X);
-    setup_segment(mmu, HEAP, 576, 96, R | W);
-    setup_segment(mmu, STACK, 448, 64, R | W);
+    // configura os segmentos
+    configure_segment(mmu, CODE_SEG, 512, 64, READ_PERM | EXEC_PERM);
+    configure_segment(mmu, HEAP_SEG, 576, 96, READ_PERM | WRITE_PERM);
+    configure_segment(mmu, STACK_SEG, 448, 64, READ_PERM | WRITE_PERM);
 
-    show_segments(mmu);
+    display_segments(mmu);
 
-    printf("Running tests...\n\n");
+    printf("Executando testes...\n\n");
 
-    printf("Test 1: write to heap\n");
-    uint8_t msg[] = {0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00};
-    write_bytes(mmu, 64, msg, 6);
+    printf("Teste 1: escrever no heap\n");
+    uint8_t mensagem[] = {0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00};  // "Hello"
+    write_data(mmu, 64, mensagem, 6);
 
-    printf("\nTest 2: read from heap\n");
-    read_bytes(mmu, 64, 6);
+    printf("\nTeste 2: ler do heap\n");
+    read_data(mmu, 64, 6);
 
-    printf("\nTest 3: write to stack\n");
+    printf("\nTeste 3: escrever na stack\n");
     uint8_t stack_data[] = {0xde, 0xad, 0xbe, 0xef};
-    write_bytes(mmu, 252, stack_data, 4);
+    write_data(mmu, 252, stack_data, 4);
 
-    printf("\nTest 4: try to write to code (should fail)\n");
-    uint8_t code[] = {0x90, 0x90};
-    write_bytes(mmu, 0, code, 2);
+    printf("\nTeste 4: tentar escrever no codigo (deve falhar)\n");
+    uint8_t codigo[] = {0x90, 0x90};  // instrucoes NOP
+    write_data(mmu, 0, codigo, 2);
 
-    printf("\nTest 5: access out of bounds (should fail)\n");
-    uint8_t dummy;
-    read_byte(mmu, 200, &dummy);
+    printf("\nTeste 5: acesso fora dos limites (deve falhar)\n");
+    uint8_t temp;
+    read_byte(mmu, 200, &temp);
 
-    dump_mem(mmu, 440, 80);
-    dump_mem(mmu, 570, 80);
+    dump_memory(mmu, 440, 80);
+    dump_memory(mmu, 570, 80);
 
-    free(mmu->mem);
+    // limpa a memoria
+    free(mmu->memory);
     free(mmu);
 }
 
 int main() {
-    test_segmentation();
+    run_tests();
     return 0;
 }
